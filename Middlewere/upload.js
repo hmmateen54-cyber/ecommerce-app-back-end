@@ -1,11 +1,6 @@
-const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
 
-const uploadRoot = path.join(__dirname, "..", "uploads");
-const productUploadDir = path.join(uploadRoot, "products");
-const productShadeUploadDir = path.join(productUploadDir, "shades");
-const bannerUploadDir = path.join(uploadRoot, "banners");
 const allowedImageTypes = new Set([
   "image/jpeg",
   "image/jpg",
@@ -14,6 +9,7 @@ const allowedImageTypes = new Set([
   "image/gif",
   "image/avif",
 ]);
+
 const allowedImageExtensions = new Set([
   ".jpg",
   ".jpeg",
@@ -22,87 +18,117 @@ const allowedImageExtensions = new Set([
   ".gif",
   ".avif",
 ]);
-const maxImageSize = 5 * 1024 * 1024;
 
-fs.mkdirSync(productUploadDir, { recursive: true });
-fs.mkdirSync(productShadeUploadDir, { recursive: true });
-fs.mkdirSync(bannerUploadDir, { recursive: true });
+// Vercel serverless request limit ko dekhte hue 4MB rakha hai
+const maxImageSize = 4 * 1024 * 1024;
 
-const createStorage = (uploadDir) =>
-  multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, uniqueName);
-  },
-  });
+/*
+  Vercel par multer.diskStorage use nahi karna.
+  Image temporary memory mein req.file.buffer ya req.files mein milegi.
+*/
+const memoryStorage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
-  const ext = path.extname(file.originalname).toLowerCase();
+  const extension = path.extname(file.originalname).toLowerCase();
 
-  if (!allowedImageTypes.has(file.mimetype) || !allowedImageExtensions.has(ext)) {
-    return cb(new Error("Only jpg, jpeg, png, webp, gif, and avif images are allowed"));
+  const validMimeType = allowedImageTypes.has(file.mimetype);
+  const validExtension = allowedImageExtensions.has(extension);
+
+  if (!validMimeType || !validExtension) {
+    return cb(
+      new Error(
+        "Only jpg, jpeg, png, webp, gif, and avif images are allowed"
+      ),
+      false
+    );
   }
 
   cb(null, true);
 };
 
-const productStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, file.fieldname === "shadeImages" ? productShadeUploadDir : productUploadDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, uniqueName);
-  },
-});
+/*
+  Product upload:
 
+  req.files.image[0]
+  req.files.shadeImages
+*/
 const productImageUpload = multer({
-  storage: productStorage,
+  storage: memoryStorage,
   fileFilter,
   limits: {
     fileSize: maxImageSize,
+    files: 21,
   },
 }).fields([
-  { name: "image", maxCount: 1 },
-  { name: "shadeImages", maxCount: 20 },
+  {
+    name: "image",
+    maxCount: 1,
+  },
+  {
+    name: "shadeImages",
+    maxCount: 20,
+  },
 ]);
 
+/*
+  Banner upload:
+
+  req.file
+*/
 const bannerImageUpload = multer({
-  storage: createStorage(bannerUploadDir),
+  storage: memoryStorage,
   fileFilter,
   limits: {
     fileSize: maxImageSize,
+    files: 1,
   },
 }).single("image");
 
-const handleUpload = (upload) => (req, res, next) => {
-  upload(req, res, (error) => {
-    if (!error) {
-      return next();
-    }
+const handleUpload = (uploadMiddleware) => {
+  return (req, res, next) => {
+    uploadMiddleware(req, res, (error) => {
+      if (!error) {
+        return next();
+      }
 
-    if (error instanceof multer.MulterError) {
-      const message =
-        error.code === "LIMIT_FILE_SIZE"
-          ? "Image must be 5MB or smaller"
-          : error.message || "Image upload failed";
+      console.error("Image upload middleware error:", error);
+
+      if (error instanceof multer.MulterError) {
+        let message = error.message || "Image upload failed";
+
+        switch (error.code) {
+          case "LIMIT_FILE_SIZE":
+            message = "Each image must be 4MB or smaller";
+            break;
+
+          case "LIMIT_FILE_COUNT":
+            message = "Too many images uploaded";
+            break;
+
+          case "LIMIT_UNEXPECTED_FILE":
+            message = `Unexpected image field: ${error.field}`;
+            break;
+
+          case "LIMIT_FIELD_COUNT":
+            message = "Too many form fields";
+            break;
+
+          default:
+            message = error.message || "Image upload failed";
+        }
+
+        return res.status(400).json({
+          success: false,
+          message,
+        });
+      }
 
       return res.status(400).json({
         success: false,
-        message,
+        message: error.message || "Image upload failed",
       });
-    }
-
-    return res.status(400).json({
-      success: false,
-      message: error.message || "Image upload failed",
     });
-  });
+  };
 };
 
 module.exports = {
